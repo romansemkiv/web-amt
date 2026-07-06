@@ -1,13 +1,27 @@
 /* Serial-over-LAN — a VT100 terminal over the AMT redirection channel. */
 Remote.terminal = function (c, amt, api) {
     var dev = api.device;
+
+    // Power/boot shortcuts shown right in the console so you can reset the machine while
+    // watching it boot over SOL (mirrors MeshCommander's Serial-over-LAN screen). Codes map
+    // to app.js POWER_ACTIONS; confirmations for destructive ones are handled there.
+    var TERM_POWER = [2, 8, 5, 10, 100, 101];
+    var powerOpts = (api.powerActions || []).filter(function (a) { return TERM_POWER.indexOf(a.code) >= 0; })
+        .map(function (a) { return '<option value="' + a.code + '">' + a.label + '</option>'; }).join('');
+    var iderOk = !(api.conn && api.conn.caps && api.conn.caps.ider === false);
+
     c.innerHTML =
         '<div class="term-shell"><div class="term-bar">' +
         '<div class="btn sm primary" id="termConnect">Connect</div>' +
         '<span class="badge dot" id="termState">Disconnected</span>' +
         '<div class="spacer" style="flex:1"></div>' +
+        '<select id="termPower" class="btn sm" title="Power or reset the machine while watching the console">' +
+        '<option value="">Power…</option>' + powerOpts + '</select>' +
+        (iderOk ? '<div class="btn sm" id="termIder" title="Mount an ISO/floppy and boot it (IDE-R)">Storage / IDER</div>' : '') +
         '<select id="termSize" class="btn sm"><option value="80x25">80 × 25</option><option value="100x30">100 × 30</option></select>' +
         '<div class="btn sm" id="termCad">Ctrl-Alt-Del</div>' +
+        '<div class="btn sm" id="termPaste" title="Paste clipboard text into the console">Paste</div>' +
+        '<div class="btn sm" id="termSave" title="Download the captured session log">Save log</div>' +
         '<div class="btn sm" id="termClear">Clear</div>' +
         '</div><div class="term-scroll" id="termScroll" tabindex="0"><div id="termContainer"></div></div></div>';
 
@@ -20,6 +34,7 @@ Remote.terminal = function (c, amt, api) {
         var dims = sizeSel.value.split('x');
         var obj = CreateAmtRemoteTerminal('termContainer', { width: parseInt(dims[0]), height: parseInt(dims[1]) });
         obj.lineFeed = '\r\n';
+        obj.capture = ''; // auto-capture the session so "Save log" can download it (MeshCommander-style)
         var redir = CreateAmtRedirect(obj);
         redir.onStateChanged = function (sender, st) {
             var badge = document.getElementById('termState'); if (!badge) return;
@@ -43,6 +58,33 @@ Remote.terminal = function (c, amt, api) {
 
     document.getElementById('termConnect').addEventListener('click', connect);
     document.getElementById('termClear').addEventListener('click', function () { if (Remote.term.obj) { Remote.term.obj.TermResetScreen(); Remote.term.obj.TermDraw(); } });
+
+    // Power/reset from the console: connect SOL first (so boot output is captured), then act.
+    var powerSel = document.getElementById('termPower');
+    if (powerSel) powerSel.addEventListener('change', function () {
+        var code = parseInt(powerSel.value, 10);
+        powerSel.value = '';
+        if (isNaN(code) || !api.powerAction) return;
+        if (!isConnected()) connect();
+        api.powerAction(code);
+    });
+    var iderBtn = document.getElementById('termIder');
+    if (iderBtn) iderBtn.addEventListener('click', function () { if (api.setTab) api.setTab('ider'); });
+
+    // Paste clipboard text into the console (needs a secure context — works over HTTPS).
+    document.getElementById('termPaste').addEventListener('click', function () {
+        if (!isConnected()) { UI.toast('Not connected', 'Connect the console before pasting.', 'warn'); return; }
+        if (!navigator.clipboard || !navigator.clipboard.readText) { UI.toast('Paste unavailable', 'Clipboard access needs an HTTPS connection.', 'warn'); return; }
+        navigator.clipboard.readText().then(function (t) { if (t) Remote.term.obj.TermSendKeys(t); })
+            .catch(function () { UI.toast('Paste blocked', 'The browser denied clipboard access.', 'warn'); });
+    });
+
+    // Download the auto-captured session log (BIOS/boot output, etc.).
+    document.getElementById('termSave').addEventListener('click', function () {
+        var log = Remote.term.obj && Remote.term.obj.capture;
+        if (!log) { UI.toast('Nothing captured', 'No console output has been received yet.', 'warn'); return; }
+        UI.download('sol-' + (dev.name || dev.host) + '.txt', log, 'text/plain');
+    });
     document.getElementById('termCad').addEventListener('click', function () { if (isConnected()) Remote.term.obj.TermSendKeys(String.fromCharCode(27) + '[3;5~'); });
     sizeSel.addEventListener('change', function () { if (Remote.term.obj) { var d = sizeSel.value.split('x'); Remote.term.obj.Init(parseInt(d[0]), parseInt(d[1])); } });
 

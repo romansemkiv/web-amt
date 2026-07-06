@@ -13,9 +13,9 @@ var App = (function () {
         { id: 'audit', label: 'Audit Log', ic: 'shield' },
         { id: 'network', label: 'Network', ic: 'globe' },
         { id: 'users', label: 'User Accounts', ic: 'people' },
-        { id: 'terminal', label: 'Serial Console', ic: 'terminal' },
-        { id: 'desktop', label: 'Remote Desktop', ic: 'display' },
-        { id: 'ider', label: 'Storage', ic: 'disc' },
+        { id: 'terminal', label: 'Serial Console', ic: 'terminal', cap: 'sol' },
+        { id: 'desktop', label: 'Remote Desktop', ic: 'display', cap: 'kvm' },
+        { id: 'ider', label: 'Storage', ic: 'disc', cap: 'ider' },
         { id: 'settings', label: 'Settings', ic: 'gearshape' },
         { id: 'explorer', label: 'WSMAN Explorer', ic: 'code' }
     ];
@@ -161,7 +161,7 @@ var App = (function () {
         renderSidebar(); renderTop();
 
         // Probe a few core classes to validate authentication and read the AMT version.
-        var res = await Amt.batch(state.conn.amt, ['*AMT_GeneralSettings', 'CIM_SoftwareIdentity', '*AMT_SetupAndConfigurationService', 'CIM_ServiceAvailableToElement']);
+        var res = await Amt.batch(state.conn.amt, ['*AMT_GeneralSettings', 'CIM_SoftwareIdentity', '*AMT_SetupAndConfigurationService', 'CIM_ServiceAvailableToElement', '*CIM_KVMRedirectionSAP', '*AMT_RedirectionService']);
         UI.progress(false);
         if (!state.conn || state.conn.deviceId !== d.id) return; // superseded by another selection
 
@@ -169,6 +169,15 @@ var App = (function () {
         if (ok) {
             state.conn.connected = true;
             state.conn.version = Amt.version(res.map);
+            // Capability detection: hide a redirection tab when the platform lacks that feature.
+            // KVM needs the Intel iGPU (absent on e.g. Xeon workstations) so its SAP won't be present;
+            // SOL/IDER ride on the redirection service.
+            var redir = !!Amt.pick(res.map, 'AMT_RedirectionService');
+            state.conn.caps = {
+                kvm: !!Amt.pick(res.map, 'CIM_KVMRedirectionSAP'),
+                sol: redir,
+                ider: redir
+            };
             renderSidebar(); renderTop(); setTab(state.tab);
             UI.toast('Connected', d.name + ' is online', 'good');
         } else {
@@ -230,15 +239,27 @@ var App = (function () {
     }
     function setSysState(v) { if (state.conn) { state.conn.sysstate = v; updatePowerBadge(); } }
 
+    // Tabs the connected device actually supports. A tab with a `cap` is hidden only
+    // when we positively determined the device lacks it (caps present and that flag false).
+    function visibleTabs() {
+        var caps = state.conn && state.conn.caps;
+        return TABS.filter(function (t) {
+            if (!t.cap || !caps) return true;
+            return caps[t.cap] !== false;
+        });
+    }
+
     function renderTabs() {
         var el = document.getElementById('tabs');
-        el.innerHTML = TABS.map(function (t) {
+        el.innerHTML = visibleTabs().map(function (t) {
             return '<div class="tab' + (t.id === state.tab ? ' active' : '') + '" data-tab="' + t.id + '"><span class="ic">' + Icons.svg(t.ic, 16) + '</span>' + t.label + '</div>';
         }).join('');
         el.querySelectorAll('.tab').forEach(function (n) { n.addEventListener('click', function () { setTab(n.getAttribute('data-tab')); }); });
     }
 
     function setTab(id) {
+        // If a hidden/unsupported tab is requested (e.g. a remembered tab), fall back to the dashboard.
+        if (!visibleTabs().some(function (t) { return t.id === id; })) id = 'dashboard';
         state.tab = id;
         renderTabs();
         if (!state.conn || !state.conn.connected) return;
