@@ -227,11 +227,12 @@ var App = (function () {
             return;
         }
         var connected = state.conn && state.conn.connected;
+        var unreachable = state.conn && state.conn.unreachable;
         g('title').textContent = d.name;
         g('sub').textContent = d.host + ':' + d.port + (state.conn && state.conn.version ? '  ·  AMT ' + AmtData.parseAmtVersion(state.conn.version) : '');
         g('conn').style.display = '';
-        g('conn').className = 'badge dot ' + (connected ? 'good' : state.conn && state.conn.error ? 'bad' : 'warn');
-        g('conn').textContent = connected ? 'Connected' : state.conn && state.conn.error ? 'Error' : 'Connecting…';
+        g('conn').className = 'badge dot ' + (unreachable ? 'bad' : connected ? 'good' : state.conn && state.conn.error ? 'bad' : 'warn');
+        g('conn').textContent = unreachable ? 'Unreachable' : connected ? 'Connected' : state.conn && state.conn.error ? 'Error' : 'Connecting…';
         g('btn').style.display = '';
         g('btn').textContent = connected ? 'Reconnect' : 'Connect';
         g('btn').onclick = function () { disconnect(); renderSidebar(); connect(); };
@@ -243,6 +244,7 @@ var App = (function () {
     function updatePowerBadge() {
         var pw = document.getElementById('tbPower');
         if (!state.conn || !state.conn.connected || state.conn.sysstate == null) { pw.style.display = 'none'; return; }
+        if (state.conn.unreachable) { pw.style.display = ''; pw.className = 'badge dot bad'; pw.textContent = 'No response'; return; }
         var ps = AmtData.powerState(state.conn.sysstate);
         pw.style.display = '';
         pw.className = 'badge dot ' + (ps[1] === 'on' ? 'good' : ps[1] === 'sleep' ? 'warn' : '');
@@ -353,16 +355,24 @@ var App = (function () {
 
     function refreshPower() {
         var amt = state.conn && state.conn.amt; if (!amt) return;
+        if (state.conn.polling) return;   // don't stack polls when one is hung (dropped network never resolves)
+        state.conn.polling = true;
+        var settled = false;
+        function finish(unreachable, powerState) {
+            if (settled || !state.conn) return;
+            settled = true; state.conn.polling = false;
+            var changed = (!!state.conn.unreachable !== !!unreachable);
+            state.conn.unreachable = !!unreachable;
+            if (!unreachable && powerState != null) setSysState(powerState);
+            if (changed) { renderTop(); renderSidebar(); }   // reflect reachability on badges + dot
+            if (!unreachable && Views.onPowerRefresh) Views.onPowerRefresh(powerState);
+        }
+        // A dropped connection makes the WSMAN request hang forever, so bound it: no answer → unreachable.
+        var t = setTimeout(function () { finish(true); }, 7000);
         Amt.enum(amt, 'CIM_ServiceAvailableToElement').then(function (r) {
-            if (!state.conn) return;
-            if (r.status === 200 && r.items.length && r.items[0].PowerState != null) {
-                if (state.conn.unreachable) { state.conn.unreachable = false; }
-                setSysState(r.items[0].PowerState);
-                if (Views.onPowerRefresh) Views.onPowerRefresh(r.items[0].PowerState);
-            } else if (r.status !== 200) {
-                // The poll failed — AMT stopped answering (unplugged, network down, power lost).
-                if (!state.conn.unreachable) { state.conn.unreachable = true; renderSidebar(); }
-            }
+            clearTimeout(t);
+            if (r.status === 200 && r.items.length && r.items[0].PowerState != null) finish(false, r.items[0].PowerState);
+            else finish(true);
         });
     }
 
