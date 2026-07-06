@@ -61,9 +61,18 @@ var App = (function () {
             return;
         }
         host.innerHTML = state.devices.map(function (d) {
-            var cls = 'dev' + (d.id === state.activeId ? ' active' : '');
-            if (state.conn && state.conn.deviceId === d.id) cls += state.conn.connected ? ' on' : state.conn.error ? ' err' : ' busy';
-            return '<div class="' + cls + '" data-id="' + d.id + '"><div class="dot"></div>' +
+            var cls = 'dev' + (d.id === state.activeId ? ' active' : ''), title = '';
+            if (state.conn && state.conn.deviceId === d.id) {
+                if (!state.conn.connected) { cls += state.conn.error ? ' err' : ' busy'; title = state.conn.error ? 'Connection error' : 'Connecting…'; }
+                else if (state.conn.unreachable) { cls += ' err'; title = 'AMT not responding'; }
+                else {
+                    // AMT answers on standby power, so "connected" ≠ "powered on" — show the real state.
+                    var pc = state.conn.sysstate != null ? AmtData.powerState(state.conn.sysstate) : null;
+                    if (pc && pc[1] !== 'on') { cls += ' off'; title = 'AMT reachable · ' + pc[0]; }
+                    else { cls += ' on'; title = pc ? 'Powered on' : 'AMT reachable'; }
+                }
+            }
+            return '<div class="' + cls + '" data-id="' + d.id + '"' + (title ? ' title="' + UI.esc(title) + '"' : '') + '><div class="dot"></div>' +
                 '<div class="meta"><div class="name">' + UI.esc(d.name) + '</div>' +
                 '<div class="host">' + UI.esc(d.host) + ':' + d.port + (d.tls ? ' 🔒' : '') + '</div></div>' +
                 '<div class="edit" data-edit="' + d.id + '">✎</div></div>';
@@ -170,16 +179,18 @@ var App = (function () {
             state.conn.connected = true;
             state.conn.version = Amt.version(res.map);
             // Capability detection: hide a redirection tab when the platform lacks that feature.
-            // KVM needs the Intel iGPU (absent on e.g. Xeon workstations) so its SAP won't be present;
-            // SOL/IDER ride on the redirection service.
-            var redir = !!Amt.pick(res.map, 'AMT_RedirectionService');
+            // KVM needs the Intel iGPU (absent on e.g. Xeon workstations); its classes then return an
+            // HTTP 400 "no route to destination" fault. A fault still carries a SOAP body, so we must
+            // require status 200 (not just a non-null body) to treat a class as present.
+            var redir = capPresent(res.map, 'AMT_RedirectionService');
             state.conn.caps = {
-                kvm: !!Amt.pick(res.map, 'CIM_KVMRedirectionSAP'),
+                kvm: capPresent(res.map, 'CIM_KVMRedirectionSAP'),
                 sol: redir,
                 ider: redir
             };
             renderSidebar(); renderTop(); setTab(state.tab);
-            UI.toast('Connected', d.name + ' is online', 'good');
+            refreshPower(); // fetch real power state right away so the status dot isn't a stale "online"
+            UI.toast('Connected', 'AMT link to ' + d.name + ' established', 'good');
         } else {
             state.conn.error = true;
             renderSidebar(); renderTop();
@@ -237,7 +248,12 @@ var App = (function () {
         pw.className = 'badge dot ' + (ps[1] === 'on' ? 'good' : ps[1] === 'sleep' ? 'warn' : '');
         pw.textContent = ps[0];
     }
-    function setSysState(v) { if (state.conn) { state.conn.sysstate = v; updatePowerBadge(); } }
+    function setSysState(v) { if (state.conn) { var prev = state.conn.sysstate; state.conn.sysstate = v; updatePowerBadge(); if (prev !== v) renderSidebar(); } }
+
+    // A WSMAN class counts as "present" only when its enumeration succeeded (status 200) and
+    // returned a body. On unsupported platforms AMT answers with an HTTP 400 fault that still
+    // has a body, so the status check is what actually distinguishes present from absent.
+    function capPresent(map, key) { var e = map && map[key]; return !!(e && e.status === 200 && e.response); }
 
     // Tabs the connected device actually supports. A tab with a `cap` is hidden only
     // when we positively determined the device lacks it (caps present and that flag false).
@@ -272,17 +288,25 @@ var App = (function () {
     }
 
     // ---------- Power control ----------
-    async function powerAction(code) {
+    async function powerAction(code, opts) {
+        opts = opts || {};
         var amt = state.conn && state.conn.amt; if (!amt) return;
         var meta = POWER_ACTIONS.filter(function (a) { return a.code === code; })[0];
         if (meta && meta.confirm) { var ok = await UI.confirm(meta.label, meta.confirm, meta.label, meta.kind === 'danger' ? 'danger' : 'primary'); if (!ok) return; }
 
+        // UseSOL tells the firmware to redirect BIOS/POST console output over Serial-over-LAN for
+        // this boot (this is what MeshCommander does). Enable it when a SOL session is open or the
+        // caller asked for it — that's what makes BIOS/POST actually appear in the terminal.
+        // Caveat (Intel docs): UseSOL cannot be combined with a forced boot source, so skip it for PXE.
+        var solActive = !!(Remote.term && Remote.term.redir && Remote.term.redir.State !== 0);
+        var useSol = !!(opts.useSol || solActive) && !(meta && meta.boot === 'pxe');
+
         UI.progress(true);
-        UI.toast('Power action', 'Applying boot settings…');
+        UI.toast('Power action', useSol ? 'Applying boot settings (SOL console redirection on)…' : 'Applying boot settings…');
         try {
             var boot = await Amt.get(amt, 'AMT_BootSettingData');
             if (boot.status !== 200) throw new Error('Could not read boot settings (' + boot.status + ')');
-            var r = applyBootSettings(boot.body, code);
+            var r = applyBootSettings(boot.body, code, useSol);
 
             await step(Amt.call(amt, 'CIM_BootConfigSetting_ChangeBootOrder', null), 'ChangeBootOrder');   // clear order
             await step(Amt.put(amt, 'AMT_BootSettingData', r), 'Put BootSettingData');                      // write settings
@@ -311,7 +335,8 @@ var App = (function () {
     }
 
     // Normalise AMT_BootSettingData for a Put: drop read-only fields, set the boot flags.
-    function applyBootSettings(r, code) {
+    // useSol=true asks the firmware to redirect the BIOS console over Serial-over-LAN for this boot.
+    function applyBootSettings(r, code, useSol) {
         ['WinREBootEnabled', 'UEFILocalPBABootEnabled', 'UEFIHTTPSBootEnabled', 'SecureBootControlEnabled', 'BootguardStatus', 'OptionsCleared', 'BIOSLastStatus', 'UefiBootParametersArray', 'RPEEnabled'].forEach(function (k) { delete r[k]; });
         var ider = (code >= 200 && code < 300);
         Object.assign(r, {
@@ -319,7 +344,7 @@ var App = (function () {
             BootMediaIndex: 0, FirmwareVerbosity: 0, ForcedProgressEvents: false,
             UseIDER: ider, IDERBootDevice: (code === 202 || code === 203) ? 1 : 0, // 1 = CD, 0 = floppy
             LockKeyboard: false, LockPowerButton: false, LockResetButton: false, LockSleepButton: false,
-            ReflashBIOS: false, UseSOL: false, UseSafeMode: false, UserPasswordBypass: false
+            ReflashBIOS: false, UseSOL: !!useSol, UseSafeMode: false, UserPasswordBypass: false
         });
         if (r.ConfigurationDataReset != null) r.ConfigurationDataReset = false;
         if (r.SecureErase != null) r.SecureErase = false;
@@ -329,9 +354,14 @@ var App = (function () {
     function refreshPower() {
         var amt = state.conn && state.conn.amt; if (!amt) return;
         Amt.enum(amt, 'CIM_ServiceAvailableToElement').then(function (r) {
+            if (!state.conn) return;
             if (r.status === 200 && r.items.length && r.items[0].PowerState != null) {
+                if (state.conn.unreachable) { state.conn.unreachable = false; }
                 setSysState(r.items[0].PowerState);
                 if (Views.onPowerRefresh) Views.onPowerRefresh(r.items[0].PowerState);
+            } else if (r.status !== 200) {
+                // The poll failed — AMT stopped answering (unplugged, network down, power lost).
+                if (!state.conn.unreachable) { state.conn.unreachable = true; renderSidebar(); }
             }
         });
     }
@@ -369,7 +399,7 @@ var App = (function () {
     function init() {
         Views.terminal = Remote.terminal; // redirection viewers live on Remote; expose as tabs
         Views.desktop = Remote.desktop;
-        Views.ider = Remote.ider;
+        Views.ider = Remote.ider; // full Storage page; the SOL/KVM toolbars open Remote.iderPopup instead
         loadDevices();
         renderSidebar();
         renderTop();
@@ -392,8 +422,9 @@ var App = (function () {
                 '<p>A modern, browser-based console for managing Intel&reg; AMT / vPro machines. Add a device to get started — power control, hardware inventory, event logs, serial console (SOL), and KVM remote desktop all run right here in your browser.</p>' +
                 '<div class="btn primary" onclick="App.addDeviceDialog()">＋ Add your first device</div></div>';
         }
-        // Poll power state while the dashboard is open.
-        setInterval(function () { if (state.conn && state.conn.connected && state.tab === 'dashboard') refreshPower(); }, 15000);
+        // Aliveness polling: keep the real power state (and reachability) current on every tab,
+        // so the status dot shows On / Off (AMT-reachable) / not-responding rather than a stale "online".
+        setInterval(function () { if (state.conn && state.conn.connected) refreshPower(); }, 10000);
     }
 
     // Public surface: bootstrap, the two entry points referenced from markup / other

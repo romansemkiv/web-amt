@@ -209,6 +209,7 @@
         on('kvmFull', function () { if (!document.fullscreenElement) { if (shell.requestFullscreen) shell.requestFullscreen(); } else if (document.exitFullscreen) document.exitFullscreen(); });
         on('kvmSettings', settingsDialog);
         on('kvmPower', powerMenu);
+        on('kvmIder', function () { Remote.iderPopup(amt, api); });
         document.getElementById('kvmVO').addEventListener('change', function () { if (isConnected()) grabInput(!viewOnly()); });
         document.getElementById('kvmKeys').addEventListener('keydown', function (e) { e.stopPropagation(); });
     };
@@ -233,6 +234,7 @@
             '<div class="btn sm" id="kvmFull" title="Full screen">' + Icons.svg('fullscreen', 14) + ' Full</div>' +
             '<div class="btn sm" id="kvmSettings" title="Display settings">' + Icons.svg('gearshape', 15) + '</div>' +
             '<div class="btn sm" id="kvmPower" title="Power actions">' + Icons.svg('power', 14) + ' Power</div>' +
+            '<div class="btn sm" id="kvmIder" title="Mount an ISO/floppy and boot it (IDE-R)">' + Icons.svg('disc', 14) + ' Storage</div>' +
             '<div class="btn sm" id="kvmEnable" title="Enable the KVM redirection port on the device">Enable KVM</div>' +
             '</div>';
     }

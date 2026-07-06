@@ -21,7 +21,7 @@ Remote.terminal = function (c, amt, api) {
         '<select id="termSize" class="btn sm"><option value="80x25">80 × 25</option><option value="100x30">100 × 30</option></select>' +
         '<div class="btn sm" id="termCad">Ctrl-Alt-Del</div>' +
         '<div class="btn sm" id="termPaste" title="Paste clipboard text into the console">Paste</div>' +
-        '<div class="btn sm" id="termSave" title="Download the captured session log">Save log</div>' +
+        '<div class="btn sm" id="termCapture" title="Start/stop recording the console; stopping downloads the log">Start Capture</div>' +
         '<div class="btn sm" id="termClear">Clear</div>' +
         '</div><div class="term-scroll" id="termScroll" tabindex="0"><div id="termContainer"></div></div></div>';
 
@@ -34,7 +34,7 @@ Remote.terminal = function (c, amt, api) {
         var dims = sizeSel.value.split('x');
         var obj = CreateAmtRemoteTerminal('termContainer', { width: parseInt(dims[0]), height: parseInt(dims[1]) });
         obj.lineFeed = '\r\n';
-        obj.capture = ''; // auto-capture the session so "Save log" can download it (MeshCommander-style)
+        obj.capture = null; // capture off by default; toggled by the Start/Stop Capture button (MeshCommander-style)
         var redir = CreateAmtRedirect(obj);
         redir.onStateChanged = function (sender, st) {
             var badge = document.getElementById('termState'); if (!badge) return;
@@ -66,10 +66,11 @@ Remote.terminal = function (c, amt, api) {
         powerSel.value = '';
         if (isNaN(code) || !api.powerAction) return;
         if (!isConnected()) connect();
-        api.powerAction(code);
+        // useSol: redirect the BIOS/POST console over SOL for this boot so it shows up here.
+        api.powerAction(code, { useSol: true });
     });
     var iderBtn = document.getElementById('termIder');
-    if (iderBtn) iderBtn.addEventListener('click', function () { if (api.setTab) api.setTab('ider'); });
+    if (iderBtn) iderBtn.addEventListener('click', function () { Remote.iderPopup(amt, api); });
 
     // Paste clipboard text into the console (needs a secure context — works over HTTPS).
     document.getElementById('termPaste').addEventListener('click', function () {
@@ -79,18 +80,39 @@ Remote.terminal = function (c, amt, api) {
             .catch(function () { UI.toast('Paste blocked', 'The browser denied clipboard access.', 'warn'); });
     });
 
-    // Download the auto-captured session log (BIOS/boot output, etc.).
-    document.getElementById('termSave').addEventListener('click', function () {
-        var log = Remote.term.obj && Remote.term.obj.capture;
-        if (!log) { UI.toast('Nothing captured', 'No console output has been received yet.', 'warn'); return; }
-        UI.download('sol-' + (dev.name || dev.host) + '.txt', log, 'text/plain');
+    // Start/Stop Capture (MeshCommander-style): start begins recording received console output;
+    // stop downloads the captured log. Capture is pure logging — it records what already arrives,
+    // it does not enable SOL data (see the keepalive-only WS frames when nothing is being sent).
+    document.getElementById('termCapture').addEventListener('click', function () {
+        var obj = Remote.term.obj; if (!obj) return;
+        var btn = document.getElementById('termCapture');
+        if (obj.capture == null) {
+            obj.capture = '';
+            btn.textContent = 'Stop Capture';
+            btn.classList.add('primary');
+            UI.toast('Capture started', 'Recording console output to a log.', 'good');
+        } else {
+            var log = obj.capture;
+            obj.capture = null;
+            btn.textContent = 'Start Capture';
+            btn.classList.remove('primary');
+            if (log) UI.download('sol-' + (dev.name || dev.host) + '.txt', log, 'text/plain');
+            else UI.toast('Nothing captured', 'No console output was received while capturing.', 'warn');
+        }
     });
     document.getElementById('termCad').addEventListener('click', function () { if (isConnected()) Remote.term.obj.TermSendKeys(String.fromCharCode(27) + '[3;5~'); });
     sizeSel.addEventListener('change', function () { if (Remote.term.obj) { var d = sizeSel.value.split('x'); Remote.term.obj.Init(parseInt(d[0]), parseInt(d[1])); } });
 
     // Route keyboard events to the terminal only while it is the active, connected view.
-    scroll.addEventListener('keydown', function (e) { if (Remote.keyTarget === 'term' && isConnected()) { if (Remote.term.obj.TermHandleKeyDown(e)) e.preventDefault(); } });
-    scroll.addEventListener('keypress', function (e) { if (Remote.keyTarget === 'term' && isConnected()) { Remote.term.obj.TermHandleKeys(e); e.preventDefault(); } });
+    // Input is driven from keydown: once keydown calls preventDefault() the (deprecated) keypress
+    // event never fires, so Enter and printable characters must be sent here to reach the device.
+    scroll.addEventListener('keydown', function (e) {
+        if (Remote.keyTarget !== 'term' || !isConnected()) return;
+        var obj = Remote.term.obj;
+        if (e.key === 'Enter' || e.which === 13) { obj.TermSendKeys('\r'); e.preventDefault(); return; }   // CR, as serial/BIOS expect
+        if (e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) { obj.TermSendKeys(e.key); e.preventDefault(); return; } // printable character
+        if (obj.TermHandleKeyDown(e)) e.preventDefault();  // arrows, F-keys, Tab, Esc, Ctrl-combos, Home/End, …
+    });
     scroll.addEventListener('keyup', function (e) { if (Remote.keyTarget === 'term' && isConnected()) Remote.term.obj.TermHandleKeyUp(e); });
 
     build();
