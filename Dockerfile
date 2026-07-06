@@ -13,15 +13,18 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # Copy the application
-COPY server.js ./
+COPY server.js mps.js ./
 COPY public ./public
 
 # Run as the built-in unprivileged node user
 USER node
 
 ENV NODE_ENV=production
-EXPOSE 3000
+# 3000 = web console; 4433 = MPS/CIRA listener (only used when --mps is passed).
+EXPOSE 3000 4433
 
 ENTRYPOINT ["/sbin/tini", "--"]
 # --any binds 0.0.0.0 so the port is reachable from outside the container.
+# To enable CIRA, override the command, e.g.:
+#   command: ["node","server.js","--any","--mps","--mps-user","admin","--mps-pass","secret"]
 CMD ["node", "server.js", "--any"]

@@ -38,6 +38,7 @@ explorer for power users.
 | **Serial console (SOL)** | Full VT100 serial-over-LAN terminal with selectable size |
 | **Remote desktop (KVM)** | Hardware KVM viewer with keyboard/mouse, **auto-scales to the viewport**, RLE + optional ZLib, no session timeout |
 | **Storage redirection (IDER)** | Mount a CD-ROM `.iso` or floppy `.img` from the browser and **boot the machine from it** |
+| **CIRA / MPS listener** | Built-in **Management Presence Server**: AMT devices dial *in* over TLS (Client Initiated Remote Access) and are managed through the tunnel — WSMAN, SOL, KVM and IDER all work, no inbound path to the device required |
 | **WSMAN Explorer** | Enumerate or Get any AMT/CIM/IPS class and inspect the raw response |
 | **UX** | Dark & light themes, responsive layout, no build step, fully self-contained (no CDN) |
 
@@ -61,6 +62,29 @@ Intel AMT device
 SOL/KVM) is computed in the browser.** AMT credentials are never sent to, or stored by,
 the relay.
 
+### CIRA / MPS (Client Initiated Remote Access)
+
+When AMT machines can't be reached directly (behind NAT, on another network, or with no
+inbound path), they can be provisioned to **dial into** WebAMT instead. WebAMT includes a
+**Management Presence Server** (`mps.js`) — a TLS listener that speaks Intel's **APF**
+protocol (an SSH-derived channel-multiplexing protocol) and keeps each device's tunnel
+open:
+
+```
+Intel AMT device  ──dials out, TLS──►  server.js : MPS/CIRA listener (port 4433)
+                                             │  APF forwarded-tcpip channels
+Browser ──WebSocket──► server.js /relay ─────┘  (16992 WSMAN · 16994 redirection)
+```
+
+The device's traffic is multiplexed back through the tunnel, so **the same WSMAN, SOL,
+KVM and IDER features work over CIRA** with no code changes — and HTTP-Digest auth is
+still done end-to-end in the browser, so the MPS never sees AMT admin credentials.
+
+Enable it with `--mps` (see options below), then in **Add device** tick *Connect via
+CIRA* and pick the connected machine from the discovery list (its AMT GUID). Devices
+authenticate to the MPS with the username/password you configure — these must match the
+CIRA profile provisioned on the AMT machines.
+
 ## Quick start
 
 Requires **Node.js 16 or newer**.
@@ -82,9 +106,26 @@ Then open <http://127.0.0.1:3000>, click **＋**, and add a device:
 
 | Flag | Description |
 |------|-------------|
-| `--port <n>` | Listen port (default `3000`) |
+| `--port <n>` | Web console listen port (default `3000`) |
 | `--any` | Bind to all interfaces instead of localhost only (`npm run start:any`) |
-| `--debug` | Verbose relay logging (`npm run debug`) |
+| `--debug` | Verbose relay + MPS logging (`npm run debug`) |
+| `--mps` | Enable the MPS/CIRA listener (requires `--mps-user` and `--mps-pass`) |
+| `--mps-port <n>` | MPS/CIRA listen port (default `4433`) |
+| `--mps-user <name>` | Username AMT devices must present for CIRA |
+| `--mps-pass <secret>` | Password AMT devices must present for CIRA |
+| `--mps-cert <file>` | TLS certificate for the MPS (PEM); auto-generated self-signed if omitted |
+| `--mps-key <file>` | TLS private key for the MPS (PEM) |
+
+Enable CIRA, for example:
+
+```bash
+node server.js --any --mps --mps-user admin --mps-pass 'your-secret'
+# or: npm run mps   (uses a demo user/pass — change it)
+```
+
+If no `--mps-cert`/`--mps-key` is given, a self-signed pair is generated once and saved
+as `mps-cert.pem` / `mps-key.pem` next to `server.js` (both git-ignored) so the device
+sees a stable certificate across restarts.
 
 > **Security**
 > - By default the relay binds to `127.0.0.1`; only use `--any` on a trusted network.
@@ -96,12 +137,17 @@ Then open <http://127.0.0.1:3000>, click **＋**, and add a device:
 > - Prefer AMT TLS (port 16993). AMT devices usually present a self-signed certificate,
 >   so the relay does not verify it — put the relay and the AMT device on a trusted
 >   network segment.
+> - The **MPS/CIRA listener** is off by default. When enabled it accepts inbound TLS from
+>   AMT devices and requires a username/password (`--mps-user`/`--mps-pass`); connections
+>   with the wrong credentials are rejected. Expose port `4433` only where your AMT
+>   machines can reach it.
 
 ## Project layout
 
 ```
 webamt/
 ├── server.js                 modern WebSocket⇄TCP/TLS relay + static host
+├── mps.js                    MPS/CIRA listener — inbound TLS + APF tunnel routing
 ├── public/
 │   ├── index.html            SPA shell (loads modules in dependency order)
 │   ├── css/app.css           design system (dark/light, responsive)

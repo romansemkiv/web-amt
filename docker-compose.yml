@@ -7,6 +7,13 @@ services:
     ports:
       # host:container — change the host side to expose a different port
       - "3000:3000"
+      # MPS/CIRA listener — AMT devices dial in here. Only needed with --mps below.
+      - "4433:4433"
+    # To enable Client Initiated Remote Access (CIRA), run the MPS listener. Devices
+    # authenticate with the username/password you set here (must match the CIRA
+    # profile provisioned on the AMT machines):
+    # command: ["node","server.js","--any","--mps","--mps-user","admin","--mps-pass","changeme"]
+    #
     # The relay needs to reach Intel AMT devices (ports 16992/16993) on your LAN.
     # The default bridge network is usually fine. If AMT hosts are only reachable
     # from the Docker host's own network stack, uncomment the next line instead

@@ -46,7 +46,7 @@ var App = (function () {
     }
     function saveDevices() {
         var out = state.devices.map(function (d) {
-            var c = { id: d.id, name: d.name, host: d.host, port: d.port, tls: d.tls, user: d.user, savePass: !!d.savePass };
+            var c = { id: d.id, name: d.name, host: d.host, port: d.port, tls: d.tls, user: d.user, cira: !!d.cira, savePass: !!d.savePass };
             if (d.savePass) c.pass = passwords[d.id] || '';
             return c;
         });
@@ -72,9 +72,12 @@ var App = (function () {
                     else { cls += ' on'; title = pc ? 'Powered on' : 'AMT reachable'; }
                 }
             }
+            var hostline = d.cira
+                ? ('CIRA · ' + UI.esc((d.host || '').substring(0, 8)) + '…')
+                : (UI.esc(d.host) + ':' + d.port + (d.tls ? ' 🔒' : ''));
             return '<div class="' + cls + '" data-id="' + d.id + '"' + (title ? ' title="' + UI.esc(title) + '"' : '') + '><div class="dot"></div>' +
                 '<div class="meta"><div class="name">' + UI.esc(d.name) + '</div>' +
-                '<div class="host">' + UI.esc(d.host) + ':' + d.port + (d.tls ? ' 🔒' : '') + '</div></div>' +
+                '<div class="host">' + hostline + '</div></div>' +
                 '<div class="edit" data-edit="' + d.id + '">✎</div></div>';
         }).join('');
         host.querySelectorAll('.dev').forEach(function (n) {
@@ -89,35 +92,68 @@ var App = (function () {
     function deviceForm(d) {
         d = d || { port: 16992, tls: false };
         return '<div class="field"><label>Friendly name</label><input id="f_name" value="' + UI.esc(d.name || '') + '" placeholder="Office PC"></div>' +
-            '<div class="field-row"><div class="field" style="flex:2"><label>Hostname / IP</label><input id="f_host" value="' + UI.esc(d.host || '') + '" placeholder="192.168.1.50"></div>' +
+            '<div class="field-row"><div class="field" style="flex:2"><label id="f_host_label">' + (d.cira ? 'AMT GUID' : 'Hostname / IP') + '</label><input id="f_host" value="' + UI.esc(d.host || '') + '" placeholder="192.168.1.50"></div>' +
             '<div class="field"><label>Port</label><input id="f_port" type="number" value="' + (d.port || 16992) + '"></div></div>' +
             '<div class="field-row"><div class="field"><label>Username</label><input id="f_user" value="' + UI.esc(d.user || 'admin') + '"></div>' +
             '<div class="field"><label>Password</label><input id="f_pass" type="password" value="' + UI.esc((d.id && passwords[d.id]) || '') + '"></div></div>' +
             '<label class="check"><input type="checkbox" id="f_tls"' + (d.tls ? ' checked' : '') + '> Use TLS (port 16993)</label>' +
+            '<label class="check"><input type="checkbox" id="f_cira"' + (d.cira ? ' checked' : '') + '> Connect via CIRA (device dials into the MPS)</label>' +
+            '<div class="field" id="f_cira_box" style="display:' + (d.cira ? 'block' : 'none') + '"><label>Connected CIRA devices</label>' +
+            '<select id="f_cira_pick"><option value="">— pick a connected device —</option></select>' +
+            '<div class="muted" style="font-size:12px;margin-top:4px">The field above holds the device’s AMT GUID; the tunnel provides TLS, so leave "Use TLS" off.</div></div>' +
             '<label class="check"><input type="checkbox" id="f_save"' + (d.savePass ? ' checked' : '') + '> Remember password in this browser</label>';
     }
     function readForm(m) {
+        var cira = m.querySelector('#f_cira') ? m.querySelector('#f_cira').checked : false;
         return {
             name: m.querySelector('#f_name').value.trim() || m.querySelector('#f_host').value.trim(),
             host: m.querySelector('#f_host').value.trim(),
             port: parseInt(m.querySelector('#f_port').value, 10) || 16992,
             user: m.querySelector('#f_user').value.trim(),
             pass: m.querySelector('#f_pass').value,
-            tls: m.querySelector('#f_tls').checked,
+            tls: cira ? false : m.querySelector('#f_tls').checked, // CIRA tunnel already provides TLS
+            cira: cira,
             savePass: m.querySelector('#f_save').checked
         };
     }
+
+    // Wire the CIRA toggle + connected-device discovery into an open device modal.
+    function wireDeviceForm(m) {
+        var cb = m.querySelector('#f_cira'); if (!cb) return;
+        var box = m.querySelector('#f_cira_box'), pick = m.querySelector('#f_cira_pick');
+        var hostLabel = m.querySelector('#f_host_label'), tls = m.querySelector('#f_tls'), port = m.querySelector('#f_port');
+        function apply() {
+            var on = cb.checked;
+            box.style.display = on ? 'block' : 'none';
+            if (hostLabel) hostLabel.textContent = on ? 'AMT GUID' : 'Hostname / IP';
+            if (on) { if (tls) tls.checked = false; if (port && (!port.value || port.value === '16993')) port.value = 16992; }
+        }
+        cb.addEventListener('change', apply); apply();
+        var base = window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1);
+        fetch(base + 'api/cira').then(function (r) { return r.json(); }).then(function (j) {
+            if (!j || !j.enabled) { var o = document.createElement('option'); o.value = ''; o.textContent = '(MPS not enabled on server)'; pick.appendChild(o); return; }
+            (j.devices || []).forEach(function (dv) {
+                var o = document.createElement('option'); o.value = dv.guid; o.textContent = dv.guid + ' (' + dv.user + ' @ ' + dv.addr + ')'; pick.appendChild(o);
+            });
+        }).catch(function () {});
+        pick.addEventListener('change', function () {
+            if (!pick.value) return;
+            m.querySelector('#f_host').value = pick.value;
+            var nameEl = m.querySelector('#f_name'); if (nameEl && !nameEl.value) nameEl.value = pick.value.substring(0, 8);
+            if (!cb.checked) { cb.checked = true; apply(); }
+        });
+    }
     function addDeviceDialog() {
-        UI.modal({ title: 'Add Intel AMT device', body: deviceForm(), okText: 'Add device', onOk: function (m) {
-            var f = readForm(m); if (!f.host) { UI.toast('Missing host', 'Enter a hostname or IP', 'bad'); return false; }
+        UI.modal({ title: 'Add Intel AMT device', body: deviceForm(), okText: 'Add device', onShow: wireDeviceForm, onOk: function (m) {
+            var f = readForm(m); if (!f.host) { UI.toast('Missing host', f.cira ? 'Pick or enter an AMT GUID' : 'Enter a hostname or IP', 'bad'); return false; }
             var id = newId();
-            state.devices.push({ id: id, name: f.name, host: f.host, port: f.port, user: f.user, tls: f.tls, savePass: f.savePass });
+            state.devices.push({ id: id, name: f.name, host: f.host, port: f.port, user: f.user, tls: f.tls, cira: f.cira, savePass: f.savePass });
             passwords[id] = f.pass; saveDevices(); renderSidebar(); selectDevice(id);
         } });
     }
     function editDeviceDialog(id) {
         var d = getDevice(id); if (!d) return;
-        UI.modal({ title: 'Edit device', body: deviceForm(d), buttons: [
+        UI.modal({ title: 'Edit device', body: deviceForm(d), onShow: wireDeviceForm, buttons: [
             { text: 'Delete', kind: 'danger', onClick: function () {
                 UI.confirm('Delete device', 'Remove "' + d.name + '"?', 'Delete', 'danger').then(function (ok) {
                     if (!ok) return;
@@ -130,7 +166,7 @@ var App = (function () {
             { text: 'Cancel' },
             { text: 'Save', kind: 'primary', onClick: function (m) {
                 var f = readForm(m); if (!f.host) return false;
-                Object.assign(d, { name: f.name, host: f.host, port: f.port, user: f.user, tls: f.tls, savePass: f.savePass });
+                Object.assign(d, { name: f.name, host: f.host, port: f.port, user: f.user, tls: f.tls, cira: f.cira, savePass: f.savePass });
                 passwords[id] = f.pass; saveDevices(); renderSidebar(); if (state.activeId === id) renderTop();
             } }
         ] });
@@ -229,7 +265,8 @@ var App = (function () {
         var connected = state.conn && state.conn.connected;
         var unreachable = state.conn && state.conn.unreachable;
         g('title').textContent = d.name;
-        g('sub').textContent = d.host + ':' + d.port + (state.conn && state.conn.version ? '  ·  AMT ' + AmtData.parseAmtVersion(state.conn.version) : '');
+        var loc = d.cira ? ('CIRA · ' + (d.host || '').substring(0, 8) + '…') : (d.host + ':' + d.port);
+        g('sub').textContent = loc + (state.conn && state.conn.version ? '  ·  AMT ' + AmtData.parseAmtVersion(state.conn.version) : '');
         g('conn').style.display = '';
         g('conn').className = 'badge dot ' + (unreachable ? 'bad' : connected ? 'good' : state.conn && state.conn.error ? 'bad' : 'warn');
         g('conn').textContent = unreachable ? 'Unreachable' : connected ? 'Connected' : state.conn && state.conn.error ? 'Error' : 'Connecting…';

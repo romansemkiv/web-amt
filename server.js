@@ -18,6 +18,7 @@ const path = require('path');
 const express = require('express');
 
 const pkg = require('./package.json');
+const { createMpsServer } = require('./mps');
 
 function parseArgs(argv) {
     const args = {};
@@ -37,6 +38,11 @@ const PORT = (() => { const p = parseInt(args.port, 10); return (!isNaN(p) && p 
 const BIND = (args.any != null) ? '0.0.0.0' : '127.0.0.1';
 const DEBUG = args.debug != null;
 
+// MPS / CIRA listener config (opt-in via --mps). AMT devices dial in here over TLS.
+const MPS_ENABLED = args.mps != null;
+const MPS_PORT = (() => { const p = parseInt(args['mps-port'], 10); return (!isNaN(p) && p > 0 && p < 65536) ? p : 4433; })();
+let mps = null; // set at startup when --mps is passed; read by the relay handler
+
 const app = express();
 require('express-ws')(app); // express-ws v2: patches app so app.listen() serves WebSockets
 
@@ -48,7 +54,13 @@ function debug(...m) { if (DEBUG) console.log('[relay]', ...m); }
 
 // Health / info endpoint
 app.get('/api/info', (req, res) => {
-    res.json({ name: 'WebAMT', version: pkg.version, node: process.version, platform: process.platform });
+    res.json({ name: 'WebAMT', version: pkg.version, node: process.version, platform: process.platform, mps: MPS_ENABLED });
+});
+
+// CIRA-connected devices currently tunnelled into the MPS. The browser uses each
+// device's `guid` as the relay host to reach it through the tunnel.
+app.get('/api/cira', (req, res) => {
+    res.json({ enabled: MPS_ENABLED, devices: mps ? mps.list() : [] });
 });
 
 /**
@@ -88,14 +100,39 @@ app.ws('/relay', (ws, req) => {
         return;
     }
 
-    let forward = null;
+    let forward = null;  // outbound net/tls socket (direct devices)
+    let cira = null;     // APF channel sink (CIRA devices)
     let closed = false;
 
     const closeAll = () => {
         if (closed) return; closed = true;
         if (forward) { try { forward.destroy(); } catch (e) {} }
+        if (cira) { try { cira.close(); } catch (e) {} }
         try { ws.close(); } catch (e) {}
     };
+
+    // Browser -> device. ws frames may be Buffer (binary) or string; normalise to Buffer.
+    ws.on('message', (msg) => {
+        if (closed) return;
+        const buf = Buffer.isBuffer(msg) ? msg : Buffer.from(msg, 'binary');
+        if (forward) { try { forward.write(buf); } catch (e) {} }
+        else if (cira) { try { cira.write(buf); } catch (e) {} }
+    });
+    ws.on('close', () => { debug('ws close', host, port); closeAll(); });
+    ws.on('error', () => closeAll());
+
+    // If `host` names a CIRA-connected device (its AMT GUID), tunnel through the MPS
+    // rather than dialing out. The device already established the outer TLS tunnel, so
+    // the inner AMT service is reached in the clear over a forwarded-tcpip channel.
+    if (mps && mps.get(host)) {
+        debug('open (cira)', host, port);
+        cira = mps.openChannel(host, port, {
+            onData: (data) => { try { ws.send(data); } catch (e) {} },
+            onClose: () => closeAll()
+        });
+        if (!cira) { debug('cira channel unavailable', host, port); try { ws.close(1011, 'cira unavailable'); } catch (e) {} }
+        return;
+    }
 
     const onTcpData = (data) => {
         // data arrives as a Buffer; forward as binary over the websocket
@@ -129,18 +166,29 @@ app.ws('/relay', (ws, req) => {
         wireTcp();
         forward.connect(port, host, () => { debug('tcp connected', host, port); });
     }
-
-    // Browser -> AMT
-    ws.on('message', (msg) => {
-        if (!forward || closed) return;
-        // ws frames may be Buffer (binary) or string; normalise to Buffer
-        const buf = Buffer.isBuffer(msg) ? msg : Buffer.from(msg, 'binary');
-        try { forward.write(buf); } catch (e) {}
-    });
-
-    ws.on('close', () => { debug('ws close', host, port); closeAll(); });
-    ws.on('error', () => closeAll());
 });
+
+// Start the MPS / CIRA listener when requested. Devices authenticate with a
+// configured username/password, so both --mps-user and --mps-pass are required.
+function startMps() {
+    if (!MPS_ENABLED) return;
+    const user = args['mps-user'];
+    const pass = args['mps-pass'];
+    if (typeof user !== 'string' || typeof pass !== 'string' || !user || !pass) {
+        console.error('  MPS/CIRA disabled: --mps requires --mps-user <name> and --mps-pass <secret>');
+        return;
+    }
+    try {
+        mps = createMpsServer({
+            port: MPS_PORT, host: BIND, user: user, pass: pass,
+            cert: (typeof args['mps-cert'] === 'string') ? args['mps-cert'] : null,
+            key: (typeof args['mps-key'] === 'string') ? args['mps-key'] : null,
+            debug: DEBUG
+        });
+    } catch (e) {
+        console.error('  MPS/CIRA failed to start:', e.message);
+    }
+}
 
 app.listen(PORT, BIND, () => {
     const shown = (BIND === '0.0.0.0') ? '*' : BIND;
@@ -148,5 +196,6 @@ app.listen(PORT, BIND, () => {
     console.log('  WebAMT — Intel(R) AMT web console');
     console.log('  Running at http://' + shown + ':' + PORT + '/');
     if (BIND === '127.0.0.1') { console.log('  (localhost only; pass --any to expose on all interfaces)'); }
+    startMps();
     console.log('');
 });
