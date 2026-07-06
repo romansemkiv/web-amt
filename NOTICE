@@ -1,0 +1,42 @@
+WebAMT
+Copyright 2026 WebAMT contributors
+
+This product includes software derived from MeshCommander
+(https://github.com/Ylianst/MeshCommander),
+Copyright Intel Corporation / Ylian Saint-Hilaire, licensed under the
+Apache License, Version 2.0.
+
+The following files under public/js/engine/ are derived from MeshCommander:
+  wsman-comm.js, wsman-stack.js, redirection.js, terminal.js, kvm.js, zlib.js,
+  and the event-log / audit-log decoders and DMTF tables within amt-stack.js
+  and amt-data.js.
+
+The standalone MD5 implementation in public/js/engine/md5.js is a public-domain
+implementation (Paul Johnston / Joseph Myers lineage), used in place of the
+node-forge library that MeshCommander inlined.
+
+Local modifications to the vendored engine:
+  - kvm.js: the first framebuffer request after connect is non-incremental, and
+    empty (0-tile) frames re-poll instead of stalling — so static screens such as
+    BIOS/POST paint reliably (marked with "WebAMT:" comments).
+  - kvm.js: mouse position is mapped with getBoundingClientRect()/clientX so the
+    remote cursor tracks the pointer correctly under CSS scaling and scrolling.
+  - redirection.js: Stop() records a disconnect code the viewer surfaces to the user.
+  - wsman-comm.js / redirection.js: the relay WebSocket URLs were simplified for this
+    browser-only relay (host is URL-encoded; the server-auth query flags were dropped).
+  - wsman-stack.js / amt-stack.js / ider.js: the dead Node.js code paths (xmldom,
+    atob, fs logging) and the browser-only environment detection were removed, since
+    the engine now runs exclusively in the browser.
+  - Unused stack methods, decoder tables and helper functions were pruned.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
