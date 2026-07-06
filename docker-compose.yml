@@ -1,0 +1,14 @@
+services:
+  webamt:
+    build: .
+    image: webamt
+    container_name: webamt
+    restart: unless-stopped
+    ports:
+      # host:container — change the host side to expose a different port
+      - "3000:3000"
+    # The relay needs to reach Intel AMT devices (ports 16992/16993) on your LAN.
+    # The default bridge network is usually fine. If AMT hosts are only reachable
+    # from the Docker host's own network stack, uncomment the next line instead
+    # of the ports mapping above:
+    # network_mode: host
