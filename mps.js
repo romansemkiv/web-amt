@@ -23,6 +23,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
 
@@ -136,18 +137,49 @@ function createMpsServer(opts) {
         requestCert: false
     };
 
-    const server = tls.createServer(tlsOpts, (socket) => handleConnection(socket));
+    // Peek the first byte of each connection before TLS so non-TLS traffic is logged with a
+    // concrete diagnosis (legacy SSLv2 hello, plain HTTP probe, or a device that isn't using
+    // TLS at all) instead of a generic handshake error. A real TLS record (type 0x16) is
+    // handed to a server-side TLS socket built from this secure context.
+    const secureContext = tls.createSecureContext(tlsOpts);
 
-    // Non-TLS data on the MPS port (ERR_SSL_WRONG_VERSION_NUMBER) is usually a port scan,
-    // a browser/health-check hitting http://…:port, or an HTTP proxy in front of the port —
-    // not the AMT device (which speaks TLS). Log the peer so it can be told apart.
-    server.on('tlsClientError', (err, socket) => info('TLS handshake failed from', (socket && socket.remoteAddress) || '?', '-', err.code || err.message, '(non-TLS data — likely a scanner/probe, not the AMT device)'));
+    const server = net.createServer((socket) => {
+        const remote = socket.remoteAddress + ':' + socket.remotePort;
+        socket.setNoDelay(true);
+        socket.setTimeout(20000, () => socket.destroy()); // drop connections that never send
+        socket.once('readable', () => {
+            const chunk = socket.read();
+            if (!chunk || !chunk.length) { socket.destroy(); return; }
+            socket.unshift(chunk);
+            if (chunk[0] === 0x16) { // TLS handshake record
+                socket.setTimeout(0);
+                const tlsSocket = new tls.TLSSocket(socket, { isServer: true, secureContext: secureContext });
+                tlsSocket.on('secure', () => info('TLS connection established from', remote, '— APF handshake starting'));
+                tlsSocket.on('error', (err) => info('TLS handshake failed from', remote, '-', err.code || err.message));
+                handleConnection(tlsSocket, remote);
+            } else {
+                info('NON-TLS data from', remote, '— rejecting.',
+                    'first bytes:', chunk.subarray(0, 24).toString('hex'),
+                    '| ascii:', chunk.subarray(0, 24).toString('latin1').replace(/[^\x20-\x7e]/g, '.'),
+                    '|', classifyFirstBytes(chunk));
+                socket.destroy();
+            }
+        });
+        socket.on('error', () => {});
+    });
+
     server.on('error', (err) => console.error('[mps] server error', err.message));
 
-    function handleConnection(socket) {
-        const remote = socket.remoteAddress + ':' + socket.remotePort;
-        info('TLS connection established from', remote, '— APF handshake starting');
+    // Best-effort guess at a non-TLS first packet, to speed diagnosis.
+    function classifyFirstBytes(b) {
+        const head = b.subarray(0, 8).toString('latin1');
+        if (/^(GET |POST|HEAD|PUT |DELETE|OPTIONS|CONNECT|TRACE|PATCH)/.test(head)) return 'looks like plain HTTP — a probe / health-check / proxy, NOT an AMT device';
+        if (b[0] === 0xC0 || b[0] === 0x05) return 'looks like raw APF with NO TLS — the device is not wrapping the CIRA connection in TLS (device-side config)';
+        if (b[0] >= 0x80) return 'looks like a legacy SSLv2/SSLv3 ClientHello — too old for this Node / OpenSSL 3 build';
+        return 'unrecognized protocol';
+    }
 
+    function handleConnection(socket, remote) {
         const conn = {
             socket: socket,
             remote: remote,
