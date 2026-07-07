@@ -135,7 +135,10 @@ function createMpsServer(opts) {
 
     const server = tls.createServer(tlsOpts, (socket) => handleConnection(socket));
 
-    server.on('tlsClientError', (err) => debug('tls client error', err.code || err.message));
+    // Non-TLS data on the MPS port (ERR_SSL_WRONG_VERSION_NUMBER) is usually a port scan,
+    // a browser/health-check hitting http://…:port, or an HTTP proxy in front of the port —
+    // not the AMT device (which speaks TLS). Log the peer so it can be told apart.
+    server.on('tlsClientError', (err, socket) => debug('tls client error from', (socket && socket.remoteAddress) || '?', '-', err.code || err.message));
     server.on('error', (err) => console.error('[mps] server error', err.message));
 
     function handleConnection(socket) {

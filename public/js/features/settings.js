@@ -97,7 +97,7 @@
             var blob = pemToDerB64(cira.cert);
             var r1 = await Amt.exec(amt, 'AMT_PublicKeyManagementService', 'AddTrustedRootCertificate', { CertificateBlob: blob });
             if (r1.status === 200 && r1.rv === 0) steps.push(['Trusted root certificate added', true]);
-            else if (r1.rv === 0x1601 /* ALREADY_EXISTS */) steps.push(['Trusted root already present', true]);
+            else if (r1.rv === 0x1601 /* ALREADY_EXISTS */ || r1.rv === 0x080A /* DUPLICATE */) steps.push(['Trusted root already present', true]);
             else steps.push(['Add trusted root: ' + (r1.rvStr || 'status ' + r1.status), false]);
 
             // 2) Add the MPS server (username/password auth).
@@ -119,6 +119,7 @@
             policyArgs.MpServer = eprToXml(mpServer);
             var r3 = await Amt.exec(amt, 'AMT_RemoteAccessService', 'AddRemoteAccessPolicyRule', policyArgs);
             if (r3.status === 200 && r3.rv === 0) steps.push(['Remote access policy added', true]);
+            else if (r3.rv === 0x080A /* DUPLICATE */) steps.push(['Remote access policy already present', true]);
             else steps.push(['Add policy: ' + (r3.rvStr || 'status ' + r3.status), false]);
 
             // 4) Environment detection — make the device consider itself "external".
