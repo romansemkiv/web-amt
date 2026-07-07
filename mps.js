@@ -117,6 +117,9 @@ function loadTlsCredentials(opts) {
  */
 function createMpsServer(opts) {
     const debug = opts.debug ? (...m) => console.log('[mps]', ...m) : () => {};
+    // Connection-lifecycle logging is always on (not gated behind --debug) so you can
+    // watch devices dial in and authenticate; byte-level tracing stays under debug().
+    const info = (...m) => console.log('[mps]', ...m);
     const devices = new Map(); // guid -> connection
 
     const creds = loadTlsCredentials(opts);
@@ -138,12 +141,12 @@ function createMpsServer(opts) {
     // Non-TLS data on the MPS port (ERR_SSL_WRONG_VERSION_NUMBER) is usually a port scan,
     // a browser/health-check hitting http://…:port, or an HTTP proxy in front of the port —
     // not the AMT device (which speaks TLS). Log the peer so it can be told apart.
-    server.on('tlsClientError', (err, socket) => debug('tls client error from', (socket && socket.remoteAddress) || '?', '-', err.code || err.message));
+    server.on('tlsClientError', (err, socket) => info('TLS handshake failed from', (socket && socket.remoteAddress) || '?', '-', err.code || err.message, '(non-TLS data — likely a scanner/probe, not the AMT device)'));
     server.on('error', (err) => console.error('[mps] server error', err.message));
 
     function handleConnection(socket) {
         const remote = socket.remoteAddress + ':' + socket.remotePort;
-        debug('device connected from', remote);
+        info('TLS connection established from', remote, '— APF handshake starting');
 
         const conn = {
             socket: socket,
@@ -165,7 +168,7 @@ function createMpsServer(opts) {
             catch (e) { debug('parse error', e.message); teardown(conn); }
         });
         socket.on('error', (err) => { debug('socket error', remote, err.code); teardown(conn); });
-        socket.on('close', () => { debug('device disconnected', remote); teardown(conn); });
+        socket.on('close', () => { info('connection closed', remote, conn.guid ? '(' + conn.guid + ')' : ''); teardown(conn); });
     }
 
     function send(conn, buf) {
@@ -199,7 +202,7 @@ function createMpsServer(opts) {
             case APF.PROTOCOLVERSION: {          // device announces itself
                 if (data.length < 93) return 0;
                 conn.guid = guidToStr(data.subarray(13, 29));
-                debug('protocol version, guid', conn.guid);
+                info('APF protocol version from', conn.remote, '— device GUID', conn.guid);
                 return 93;
             }
             case APF.SERVICE_REQUEST: {           // "auth@..." then "pfwd@..."
@@ -339,10 +342,12 @@ function createMpsServer(opts) {
                 if (prev && prev !== conn) teardown(prev);
                 devices.set(conn.guid, conn);
             }
-            debug('auth success for', user, 'guid', conn.guid);
+            info('✓ CIRA device ONLINE:', conn.guid, '(user "' + user + '" from ' + conn.remote + ')');
             send(conn, Buffer.from([APF.USERAUTH_SUCCESS]));
         } else {
-            debug('auth FAILURE for', user, '(rejecting)');
+            info('✗ auth REJECTED from', conn.remote, '— user "' + user + '"',
+                (user !== opts.user) ? '(username mismatch)' : '(password mismatch)',
+                '— must match --mps-user/--mps-pass');
             // 51 | list-of-methods(str "password") | partial-success(bool)
             send(conn, Buffer.concat([Buffer.from([APF.USERAUTH_FAILURE]), apfStr('password'), Buffer.from([0])]));
         }
@@ -366,7 +371,7 @@ function createMpsServer(opts) {
             o += alen; // bind address
             const port = data.readUInt32BE(o); o += 4;
             if (conn.forwards.indexOf(port) < 0) conn.forwards.push(port);
-            debug('tcpip-forward port', port);
+            info('port', port, 'forwarded by', conn.guid || conn.remote, '— now reachable through the tunnel');
             // REQUEST_SUCCESS carries the bound port back to the device.
             if (wantReply) send(conn, Buffer.concat([Buffer.from([APF.REQUEST_SUCCESS]), u32(port)]));
             return o;
@@ -420,7 +425,7 @@ function createMpsServer(opts) {
             apfStr('127.0.0.1'), u32(ourId + 2048)
         ]);
         send(conn, msg);
-        debug('opening channel', ourId, 'to port', port);
+        info('management session: opening tunnel channel', ourId, 'to port', port, 'on', conn.guid);
 
         return {
             write: (buf) => { ch.outQueue = ch.outQueue.length ? Buffer.concat([ch.outQueue, buf]) : Buffer.from(buf); flushChannel(conn, ch); },

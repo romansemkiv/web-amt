@@ -114,7 +114,7 @@
         renderSteps('CIRA configuration removed',
             'All MPS servers and remote-access policies were removed. The device will stop dialing into the MPS.',
             'Some items could not be removed — review below.',
-            steps, ['CIRA removed', 'Device will stop dialing in']);
+            steps, ['CIRA removed', 'Device will stop dialing in'], await readBack(amt));
     }
 
     // Build the WSMAN key selector set for a CIM instance from an enumerated item.
@@ -134,23 +134,28 @@
         if (!user || !pass) return UI.toast('Missing credentials', 'Enter the MPS username and password', 'bad');
         if (!cira.cert) return UI.toast('No server certificate', 'The server did not provide its MPS certificate', 'bad');
 
+        var infoFormat = /^(\d{1,3}\.){3}\d{1,3}$/.test(host) ? 3 : 201; // 3 = IPv4, 201 = FQDN
+        clog('Configuring device → MPS', host + ':' + port, '| user', user, '| CN', cira.cn,
+            '| trigger', trigger === 2 ? ('periodic/' + interval + 's') : 'user-initiated', '| InfoFormat', infoFormat, '| env-domain', domain || '(none)');
+
         var steps = [];
         UI.progress(true);
         try {
             // 1) Trust the MPS certificate (so the device can validate the TLS tunnel).
             var blob = pemToDerB64(cira.cert);
             var r1 = await Amt.exec(amt, 'AMT_PublicKeyManagementService', 'AddTrustedRootCertificate', { CertificateBlob: blob });
+            clog('1/4 AddTrustedRootCertificate → status', r1.status, 'rv', r1.rv, '(' + (r1.rvStr || '-') + ')');
             if (r1.status === 200 && r1.rv === 0) steps.push(['Trusted root certificate added', true]);
             else if (r1.rv === 0x1601 /* ALREADY_EXISTS */ || r1.rv === 0x080A /* DUPLICATE */) steps.push(['Trusted root already present', true]);
             else steps.push(['Add trusted root: ' + (r1.rvStr || 'status ' + r1.status), false]);
 
             // 2) Add the MPS server (username/password auth).
-            var infoFormat = /^(\d{1,3}\.){3}\d{1,3}$/.test(host) ? 3 : 201; // 3 = IPv4, 201 = FQDN
             var r2 = await Amt.exec(amt, 'AMT_RemoteAccessService', 'AddMpServer', {
                 AccessInfo: host, InfoFormat: infoFormat, Port: port, AuthMethod: 2,
                 Username: user, Password: pass, CN: cira.cn || host
             });
             var mpServer = r2.body && r2.body.MpServer;
+            clog('2/4 AddMpServer → status', r2.status, 'rv', r2.rv, '(' + (r2.rvStr || '-') + ') MpServer?', !!mpServer);
             if (r2.status === 200 && r2.rv === 0 && mpServer) { steps.push(['MPS server added', true]); }
             else { steps.push(['Add MPS server: ' + (r2.rvStr || 'status ' + r2.status), false]); return finish(c, amt, steps); }
 
@@ -162,6 +167,7 @@
             if (trigger === 2) policyArgs.ExtendedData = btoa(intToStr(0) + intToStr(interval)); // 0 = periodic
             policyArgs.MpServer = eprToXml(mpServer);
             var r3 = await Amt.exec(amt, 'AMT_RemoteAccessService', 'AddRemoteAccessPolicyRule', policyArgs);
+            clog('3/4 AddRemoteAccessPolicyRule → status', r3.status, 'rv', r3.rv, '(' + (r3.rvStr || '-') + ')');
             if (r3.status === 200 && r3.rv === 0) steps.push(['Remote access policy added', true]);
             else if (r3.rv === 0x080A /* DUPLICATE */) steps.push(['Remote access policy already present', true]);
             else steps.push(['Add policy: ' + (r3.rvStr || 'status ' + r3.status), false]);
@@ -172,24 +178,45 @@
                 if (eds.status === 200 && eds.body) {
                     var clone = Object.assign({}, eds.body, { DetectionStrings: [domain] });
                     var r4 = await Amt.put(amt, 'AMT_EnvironmentDetectionSettingData', clone);
+                    clog('4/4 EnvironmentDetection set', domain, '→ status', r4.status);
                     steps.push([r4.status === 200 ? 'Environment detection set' : ('Environment detection: ' + Amt.wsErr(r4.resp, r4.status)), r4.status === 200]);
                 } else steps.push(['Environment detection: could not read settings', false]);
             }
         } catch (e) {
+            clog('ERROR', e.message);
             steps.push(['Unexpected error: ' + e.message, false]);
         }
-        finish(c, amt, steps);
+        finish(c, amt, steps, await readBack(amt));
     }
 
-    function finish(c, amt, steps) {
+    // Read back what CIRA config is actually on the device now, for verification. Returns
+    // an HTML block for the summary modal (and logs the raw instances to the console).
+    async function readBack(amt) {
+        try {
+            var saps = (await Amt.enum(amt, 'AMT_ManagementPresenceRemoteSAP')).items || [];
+            var pols = (await Amt.enum(amt, 'AMT_RemoteAccessPolicyRule')).items || [];
+            clog('On device now — MPS servers:', saps, '| policies:', pols);
+            var sapList = saps.map(function (s) { return '· ' + Comp.esc((s.AccessInfo || s.Name || '?') + (s.Port ? ':' + s.Port : '')); }).join('<br>') || '<span class="muted">none</span>';
+            var polList = pols.map(function (p) { return '· ' + Comp.esc(p.PolicyRuleName || 'policy'); }).join('<br>') || '<span class="muted">none</span>';
+            return '<div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(128,128,128,.25)"><b>On the device now</b>' +
+                '<div style="margin-top:6px;font-size:13px"><span class="muted">MPS servers (' + saps.length + '):</span><br>' + sapList + '</div>' +
+                '<div style="margin-top:6px;font-size:13px"><span class="muted">Policies (' + pols.length + '):</span><br>' + polList + '</div>' +
+                (saps.length > 1 ? '<div class="hint" style="margin-top:8px">⚠️ Multiple MPS servers — earlier runs left duplicates. Use “Remove CIRA configuration”, then configure once.</div>' : '') +
+                '</div>';
+        } catch (e) { return ''; }
+    }
+
+    function clog() { try { console.info.apply(console, ['%c[CIRA]', 'color:#4f8cff;font-weight:bold'].concat([].slice.call(arguments))); } catch (e) {} }
+
+    function finish(c, amt, steps, extraHtml) {
         renderSteps('CIRA configured',
             'The device is set up to dial into the MPS. It should appear under Add device → Connect via CIRA shortly.',
             'Some steps did not complete — review below. Configuring CIRA usually requires Admin Control Mode (ACM).',
-            steps, ['CIRA configured', 'Device will dial into the MPS']);
+            steps, ['CIRA configured', 'Device will dial into the MPS'], extraHtml);
     }
 
     // Shared multi-step summary modal. steps: [ [label, ok], ... ]. okToast: [title, msg] or null.
-    function renderSteps(title, okMsg, warnMsg, steps, okToast) {
+    function renderSteps(title, okMsg, warnMsg, steps, okToast, extraHtml) {
         UI.progress(false);
         var ok = steps.every(function (s) { return s[1]; });
         var listHtml = steps.map(function (s) {
@@ -198,7 +225,7 @@
         UI.modal({
             title: ok ? title : title + ' — with issues',
             okText: null, cancelText: 'Close',
-            body: '<p class="muted" style="margin:0 0 10px">' + (ok ? okMsg : warnMsg) + '</p>' + listHtml
+            body: '<p class="muted" style="margin:0 0 10px">' + (ok ? okMsg : warnMsg) + '</p>' + listHtml + (extraHtml || '')
         });
         if (ok && okToast) UI.toast(okToast[0], okToast[1], 'good');
     }
