@@ -135,6 +135,13 @@ If no `--mps-cert`/`--mps-key` is given, a self-signed pair is generated once an
 as `mps-cert.pem` / `mps-key.pem` next to `server.js` (both git-ignored) so the device
 sees a stable certificate across restarts.
 
+**Environment variables.** Every setting also reads from an env var (the CLI flag wins if
+both are set) — convenient for Docker/Coolify and it keeps secrets off the command line:
+`PORT`, `WEBAMT_ANY=1`, `WEBAMT_DEBUG=1`, `MPS=1`, `MPS_PORT`, `MPS_USER`, `MPS_PASS`,
+`MPS_CERT`, `MPS_KEY`. Prefer env vars for the password: a `$` in a value passed through a
+Docker Compose `command:`/`${...}` is interpreted as a variable and silently truncated,
+whereas an injected env var is passed through verbatim.
+
 > **Security**
 > - By default the relay binds to `127.0.0.1`; only use `--any` on a trusted network.
 > - The relay rejects cross-origin WebSocket upgrades, so another web page you visit
@@ -154,11 +161,17 @@ sees a stable certificate across restarts.
 
 A ready-made compose file, [`docker-compose.coolify.yml`](docker-compose.coolify.yml),
 is included. In Coolify create a **Docker Compose** resource from this repo and point it
-at that file, then set `MPS_USER` / `MPS_PASS` as environment variables and attach a
-domain to the web console (port 3000). The MPS/CIRA port `4433` is a raw TLS listener, so
-it's exposed via a direct host port mapping (not the proxy) — open it on your firewall so
-AMT devices can dial in. See the comments in the file for details. Omit the `command:` and
-the `4433` mapping to deploy the web console / direct relay only.
+at that file, then set `MPS_USER` / `MPS_PASS` in Coolify's **Environment Variables** UI
+(Coolify injects them into the container; the app reads them directly, so they're not
+interpolated in the compose) and attach a domain to the web console (port 3000).
+
+The MPS/CIRA port `4433` is a **raw TLS listener** — AMT devices validate its certificate
+end-to-end, so it must reach the Node process untouched. Expose it as a **direct host port
+mapping** (`ports: "4433:4433"`), never as an HTTP route through Coolify's Traefik proxy —
+otherwise the proxy terminates TLS and the device's handshake fails with
+`ERR_SSL_WRONG_VERSION_NUMBER`. Open TCP 4433 on your firewall, and point the device's MPS
+address at the host's IP (not a CDN/proxied domain). Remove the `MPS*` env entries and the
+`4433` mapping to deploy the web console / direct relay only.
 
 ## Project layout
 

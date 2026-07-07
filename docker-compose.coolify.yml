@@ -1,17 +1,20 @@
 # WebAMT — Coolify deployment (Docker Compose build pack).
 #
-# Deploy: Coolify -> New Resource -> Docker Compose -> pick this repo, and set this
-# file as the compose path. Then:
-#   1. Set MPS_USER / MPS_PASS as Environment Variables in Coolify (secrets). These
-#      must match the CIRA profile provisioned on your Intel AMT machines.
-#   2. Attach a domain to the web console in the Coolify UI — Coolify proxies port
-#      3000 and issues Let's Encrypt TLS automatically.
-#   3. Open inbound TCP 4433 on the host/firewall so AMT devices can dial into the
-#      MPS. 4433 is a RAW TLS listener (not HTTP), so it bypasses the proxy via the
-#      direct port mapping below — it does not get a domain.
+# Deploy: Coolify -> New Resource -> Docker Compose -> pick this repo, set this file as
+# the compose path. Then:
+#   1. In Coolify -> Environment Variables, set MPS_USER and MPS_PASS (the credentials AMT
+#      devices present for CIRA — must match the CIRA profile on the machines). Coolify
+#      injects these into the container and the app reads them directly, so they are NOT
+#      referenced with ${...} here. That is deliberate: a '$' in the password would
+#      otherwise be eaten by Docker Compose interpolation and silently truncate it.
+#   2. Attach a domain to the web console (port 3000) in the Coolify UI — Coolify proxies
+#      it and issues Let's Encrypt TLS automatically.
+#   3. Open inbound TCP 4433 on the host/firewall. 4433 is a RAW TLS listener (the AMT
+#      device validates its certificate end-to-end), so it MUST be a raw host port
+#      mapping — never routed through Coolify's HTTP proxy (Traefik). The `ports:` entry
+#      below binds it directly on the host, bypassing the proxy.
 #
-# If you don't need CIRA, drop the `command:` line (and the 4433 mapping) to run the
-# web console / direct relay only.
+# If you don't need CIRA, remove the MPS* environment entries and the 4433 mapping.
 
 services:
   webamt:
@@ -27,17 +30,17 @@ services:
     ports:
       - "4433:4433"
 
-    # Enable the MPS/CIRA listener. Secrets are substituted from the environment,
-    # so they are never baked into the image. Remove this line for web-console-only.
-    command: ["node", "server.js", "--any", "--mps", "--mps-user", "${MPS_USER}", "--mps-pass", "${MPS_PASS}", "--mps-cert", "/certs/mps-cert.pem", "--mps-key", "/certs/mps-key.pem"]
-
     environment:
-      - MPS_USER=${MPS_USER}
-      - MPS_PASS=${MPS_PASS}
+      # Enable the MPS/CIRA listener and bind on all interfaces. These have no '$',
+      # so referencing them here is safe.
+      - MPS=1
+      - WEBAMT_ANY=1
+      # Persist the self-signed MPS certificate on the volume below so AMT devices keep
+      # trusting the same cert across redeploys.
+      - MPS_CERT=/certs/mps-cert.pem
+      - MPS_KEY=/certs/mps-key.pem
+      # MPS_USER / MPS_PASS come from the Coolify Environment Variables UI (see note above).
 
-    # Persist the MPS TLS certificate across redeploys so AMT devices keep trusting
-    # it. On first run WebAMT writes a self-signed pair here; replace with your own
-    # PEM files if your devices are provisioned to trust a specific certificate.
     volumes:
       - webamt-certs:/certs
 

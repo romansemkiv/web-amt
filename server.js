@@ -34,14 +34,23 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv);
-const PORT = (() => { const p = parseInt(args.port, 10); return (!isNaN(p) && p > 0 && p < 65536) ? p : 3000; })();
-const BIND = (args.any != null) ? '0.0.0.0' : '127.0.0.1';
-const DEBUG = args.debug != null;
 
-// MPS / CIRA listener config (opt-in via --mps). AMT devices dial in here over TLS.
-const MPS_ENABLED = args.mps != null;
-const MPS_PORT = (() => { const p = parseInt(args['mps-port'], 10); return (!isNaN(p) && p > 0 && p < 65536) ? p : 4433; })();
-let mps = null; // set at startup when --mps is passed; read by the relay handler
+// Config resolves from CLI flags first, then environment variables. Env vars are handy
+// for Docker / Coolify where secrets are injected into the container — this keeps them
+// off the command line and, crucially, out of Docker Compose ${...} interpolation, which
+// otherwise mangles a password containing a '$' (e.g. "pass$Abc" -> "pass").
+function envStr(name) { const v = process.env[name]; return (v != null && v !== '') ? v : null; }
+function envBool(name) { const v = (process.env[name] || '').toLowerCase(); return v === '1' || v === 'true' || v === 'yes' || v === 'on'; }
+function flagStr(name) { return (typeof args[name] === 'string' && args[name] !== '') ? args[name] : null; }
+
+const PORT = (() => { const p = parseInt(flagStr('port') || envStr('PORT'), 10); return (!isNaN(p) && p > 0 && p < 65536) ? p : 3000; })();
+const BIND = (args.any != null || envBool('WEBAMT_ANY')) ? '0.0.0.0' : '127.0.0.1';
+const DEBUG = args.debug != null || envBool('WEBAMT_DEBUG');
+
+// MPS / CIRA listener config (opt-in via --mps or MPS=1). AMT devices dial in over TLS.
+const MPS_ENABLED = args.mps != null || envBool('MPS');
+const MPS_PORT = (() => { const p = parseInt(flagStr('mps-port') || envStr('MPS_PORT'), 10); return (!isNaN(p) && p > 0 && p < 65536) ? p : 4433; })();
+let mps = null; // set at startup when MPS is enabled; read by the relay handler
 
 const app = express();
 require('express-ws')(app); // express-ws v2: patches app so app.listen() serves WebSockets
@@ -179,17 +188,17 @@ app.ws('/relay', (ws, req) => {
 // configured username/password, so both --mps-user and --mps-pass are required.
 function startMps() {
     if (!MPS_ENABLED) return;
-    const user = args['mps-user'];
-    const pass = args['mps-pass'];
-    if (typeof user !== 'string' || typeof pass !== 'string' || !user || !pass) {
-        console.error('  MPS/CIRA disabled: --mps requires --mps-user <name> and --mps-pass <secret>');
+    const user = flagStr('mps-user') || envStr('MPS_USER');
+    const pass = flagStr('mps-pass') || envStr('MPS_PASS');
+    if (!user || !pass) {
+        console.error('  MPS/CIRA disabled: set --mps-user/--mps-pass (or MPS_USER/MPS_PASS env vars)');
         return;
     }
     try {
         mps = createMpsServer({
             port: MPS_PORT, host: BIND, user: user, pass: pass,
-            cert: (typeof args['mps-cert'] === 'string') ? args['mps-cert'] : null,
-            key: (typeof args['mps-key'] === 'string') ? args['mps-key'] : null,
+            cert: flagStr('mps-cert') || envStr('MPS_CERT'),
+            key: flagStr('mps-key') || envStr('MPS_KEY'),
             debug: DEBUG
         });
     } catch (e) {
