@@ -68,7 +68,8 @@
             '<div class="field"><label>Environment detection domain</label><input id="cira_domain" value="cira.local" placeholder="cira.local">' +
             '<div class="hint">AMT uses CIRA only when its network DNS suffix does <b>not</b> match this. Use a domain your LAN never assigns (e.g. <code>cira.local</code>) to always dial in, or your corporate suffix to dial in only when off-site.</div></div>' +
             '<div class="hint" style="margin-bottom:12px">Username and password must match the server’s <code>--mps-user</code> / <code>--mps-pass</code> (max 16 chars; AMT requires a strong password).</div>' +
-            '<div class="btn primary" id="cira_apply">Configure device for CIRA</div>';
+            '<div class="btn-row"><div class="btn primary" id="cira_apply">Configure device for CIRA</div>' +
+            '<div class="btn" id="cira_remove">Remove CIRA configuration</div></div>';
     }
 
     function wireCira(c, amt, cira) {
@@ -78,6 +79,49 @@
         function syncInterval() { ibox.style.display = (trig.value === '2') ? '' : 'none'; }
         trig.addEventListener('change', syncInterval); syncInterval();
         document.getElementById('cira_apply').addEventListener('click', function () { configureCira(c, amt, cira); });
+        document.getElementById('cira_remove').addEventListener('click', function () { removeCira(amt); });
+    }
+
+    // Remove all MPS servers and remote-access policies from the device.
+    async function removeCira(amt) {
+        var ok = await UI.confirm('Remove CIRA configuration',
+            'Delete all MPS servers and remote-access policies from this device? It will stop dialing into the MPS.', 'Remove', 'danger');
+        if (!ok) return;
+        var steps = [];
+        UI.progress(true);
+        try {
+            // Policies first — they reference the MPS servers via an association.
+            var pols = (await Amt.enum(amt, 'AMT_RemoteAccessPolicyRule')).items || [];
+            var pOk = 0, pFail = 0;
+            for (var i = 0; i < pols.length; i++) {
+                var rp = await Amt.call(amt, 'Delete', 'AMT_RemoteAccessPolicyRule', keySel(pols[i], 'PolicyRuleName'));
+                if (rp.status === 200) pOk++; else pFail++;
+            }
+            steps.push([pOk + ' policy rule(s) removed' + (pFail ? ', ' + pFail + ' failed' : ''), pFail === 0]);
+
+            var saps = (await Amt.enum(amt, 'AMT_ManagementPresenceRemoteSAP')).items || [];
+            var sOk = 0, sFail = 0;
+            for (i = 0; i < saps.length; i++) {
+                var rs = await Amt.call(amt, 'Delete', 'AMT_ManagementPresenceRemoteSAP', keySel(saps[i], 'Name'));
+                if (rs.status === 200) sOk++; else sFail++;
+            }
+            steps.push([sOk + ' MPS server(s) removed' + (sFail ? ', ' + sFail + ' failed' : ''), sFail === 0]);
+
+            if (!pols.length && !saps.length) steps.push(['No CIRA configuration was present', true]);
+        } catch (e) {
+            steps.push(['Unexpected error: ' + e.message, false]);
+        }
+        renderSteps('CIRA configuration removed',
+            'All MPS servers and remote-access policies were removed. The device will stop dialing into the MPS.',
+            'Some items could not be removed — review below.',
+            steps, ['CIRA removed', 'Device will stop dialing in']);
+    }
+
+    // Build the WSMAN key selector set for a CIM instance from an enumerated item.
+    function keySel(item, nameKey) {
+        var s = {};
+        [nameKey, 'CreationClassName', 'SystemCreationClassName', 'SystemName'].forEach(function (k) { if (item[k] != null) s[k] = item[k]; });
+        return s;
     }
 
     async function configureCira(c, amt, cira) {
@@ -138,19 +182,25 @@
     }
 
     function finish(c, amt, steps) {
+        renderSteps('CIRA configured',
+            'The device is set up to dial into the MPS. It should appear under Add device → Connect via CIRA shortly.',
+            'Some steps did not complete — review below. Configuring CIRA usually requires Admin Control Mode (ACM).',
+            steps, ['CIRA configured', 'Device will dial into the MPS']);
+    }
+
+    // Shared multi-step summary modal. steps: [ [label, ok], ... ]. okToast: [title, msg] or null.
+    function renderSteps(title, okMsg, warnMsg, steps, okToast) {
         UI.progress(false);
         var ok = steps.every(function (s) { return s[1]; });
         var listHtml = steps.map(function (s) {
             return '<div style="display:flex;gap:8px;align-items:flex-start;margin:6px 0"><span>' + (s[1] ? '✅' : '⚠️') + '</span><span>' + Comp.esc(s[0]) + '</span></div>';
         }).join('');
         UI.modal({
-            title: ok ? 'CIRA configured' : 'CIRA configuration finished with issues',
+            title: ok ? title : title + ' — with issues',
             okText: null, cancelText: 'Close',
-            body: '<p class="muted" style="margin:0 0 10px">' + (ok
-                ? 'The device is set up to dial into the MPS. It should appear under Add device → Connect via CIRA shortly.'
-                : 'Some steps did not complete — review below. Configuring CIRA usually requires Admin Control Mode (ACM).') + '</p>' + listHtml
+            body: '<p class="muted" style="margin:0 0 10px">' + (ok ? okMsg : warnMsg) + '</p>' + listHtml
         });
-        if (ok) UI.toast('CIRA configured', 'Device will dial into the MPS', 'good');
+        if (ok && okToast) UI.toast(okToast[0], okToast[1], 'good');
     }
 
     // PEM certificate -> base64 DER (strip the armor and whitespace).
