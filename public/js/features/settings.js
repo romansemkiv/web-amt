@@ -111,8 +111,12 @@
             else { steps.push(['Add MPS server: ' + (r2.rvStr || 'status ' + r2.status), false]); return finish(c, amt, steps); }
 
             // 3) Add the remote-access policy that triggers the tunnel.
-            var policyArgs = { Trigger: trigger, TunnelLifeTime: 0, MpServer: eprToXml(mpServer) };
+            // AMT validates method parameters in schema order, so build them in the exact
+            // sequence Trigger, TunnelLifeTime, ExtendedData, MpServer — a wrong order is
+            // rejected with an HTTP 400 SchemaValidationError.
+            var policyArgs = { Trigger: trigger, TunnelLifeTime: 0 };
             if (trigger === 2) policyArgs.ExtendedData = btoa(intToStr(0) + intToStr(interval)); // 0 = periodic
+            policyArgs.MpServer = eprToXml(mpServer);
             var r3 = await Amt.exec(amt, 'AMT_RemoteAccessService', 'AddRemoteAccessPolicyRule', policyArgs);
             if (r3.status === 200 && r3.rv === 0) steps.push(['Remote access policy added', true]);
             else steps.push(['Add policy: ' + (r3.rvStr || 'status ' + r3.status), false]);
