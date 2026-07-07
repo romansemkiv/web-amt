@@ -70,26 +70,25 @@ function guidToStr(buf16) {
 }
 
 /**
- * Obtain the TLS key/cert for the listener. Priority:
- *   1. explicit --mps-cert / --mps-key files
- *   2. previously generated pair next to this module (mps-cert.pem / mps-key.pem)
- *   3. generate a fresh self-signed pair (needs the optional 'selfsigned' package)
- * The generated pair is persisted so the device sees a stable certificate across
- * restarts (AMT can be provisioned to trust it by hash).
+ * Obtain the TLS key/cert for the listener. The cert/key paths (explicit
+ * --mps-cert/--mps-key, or a default pair next to this module) are treated as the
+ * store: read them if they already exist, otherwise generate a self-signed pair and
+ * write it there (needs the optional 'selfsigned' package). Persisting the pair means
+ * the device sees a stable certificate across restarts — point --mps-cert/--mps-key
+ * at a writable volume (or pre-place your own PEM files there) to keep it stable in a
+ * container. Generation failing to write (e.g. a read-only path) is non-fatal: the
+ * in-memory cert is still used, it just won't persist.
  */
 function loadTlsCredentials(opts) {
-    if (opts.cert && opts.key) {
-        return { cert: fs.readFileSync(opts.cert), key: fs.readFileSync(opts.key) };
-    }
-    const certPath = path.join(__dirname, 'mps-cert.pem');
-    const keyPath = path.join(__dirname, 'mps-key.pem');
+    const certPath = opts.cert || path.join(__dirname, 'mps-cert.pem');
+    const keyPath = opts.key || path.join(__dirname, 'mps-key.pem');
     if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
         return { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
     }
     let selfsigned;
     try { selfsigned = require('selfsigned'); }
     catch (e) {
-        throw new Error('No MPS certificate available. Pass --mps-cert/--mps-key, or run "npm install" so a self-signed one can be generated.');
+        throw new Error('No MPS certificate at ' + certPath + '. Provide --mps-cert/--mps-key PEM files, or run "npm install" so a self-signed one can be generated.');
     }
     const pems = selfsigned.generate(
         [{ name: 'commonName', value: 'WebAMT-MPS' }],

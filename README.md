@@ -142,6 +142,16 @@ sees a stable certificate across restarts.
 >   with the wrong credentials are rejected. Expose port `4433` only where your AMT
 >   machines can reach it.
 
+### Deploy on Coolify
+
+A ready-made compose file, [`docker-compose.coolify.yml`](docker-compose.coolify.yml),
+is included. In Coolify create a **Docker Compose** resource from this repo and point it
+at that file, then set `MPS_USER` / `MPS_PASS` as environment variables and attach a
+domain to the web console (port 3000). The MPS/CIRA port `4433` is a raw TLS listener, so
+it's exposed via a direct host port mapping (not the proxy) — open it on your firewall so
+AMT devices can dial in. See the comments in the file for details. Omit the `command:` and
+the `4433` mapping to deploy the web console / direct relay only.
+
 ## Project layout
 
 ```
