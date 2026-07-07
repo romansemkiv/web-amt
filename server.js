@@ -57,10 +57,17 @@ app.get('/api/info', (req, res) => {
     res.json({ name: 'WebAMT', version: pkg.version, node: process.version, platform: process.platform, mps: MPS_ENABLED });
 });
 
-// CIRA-connected devices currently tunnelled into the MPS. The browser uses each
-// device's `guid` as the relay host to reach it through the tunnel.
+// CIRA-connected devices currently tunnelled into the MPS, plus the MPS parameters
+// the device-configuration flow needs (port, cert CN, and the cert to add as a
+// trusted root). The browser uses each device's `guid` as the relay host.
 app.get('/api/cira', (req, res) => {
-    res.json({ enabled: MPS_ENABLED, devices: mps ? mps.list() : [] });
+    res.json({
+        enabled: MPS_ENABLED,
+        port: mps ? mps.port : MPS_PORT,
+        cn: mps ? mps.cn : null,
+        cert: mps ? mps.cert : null,
+        devices: mps ? mps.list() : []
+    });
 });
 
 /**

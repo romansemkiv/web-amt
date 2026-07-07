@@ -24,6 +24,7 @@
 const fs = require('fs');
 const path = require('path');
 const tls = require('tls');
+const crypto = require('crypto');
 
 // ---- APF message types ----
 const APF = {
@@ -55,6 +56,15 @@ const CHANNEL_RX_WINDOW = 32768;
 const CHANNEL_MAX_PACKET = 0xFFFFFF; // largest single CHANNEL_DATA payload we accept
 
 function u32(n) { const b = Buffer.allocUnsafe(4); b.writeUInt32BE(n >>> 0, 0); return b; }
+
+// Common Name of a PEM certificate (used so the device-config flow can add the MPS
+// cert as a trusted root and match it by CN).
+function certCommonName(pem) {
+    try {
+        const m = /CN=([^\n,/]+)/.exec(new crypto.X509Certificate(pem).subject);
+        return m ? m[1].trim() : null;
+    } catch (e) { return null; }
+}
 
 // APF string field: uint32 length + bytes.
 function apfStr(s) { const b = Buffer.from(s, 'utf8'); return Buffer.concat([u32(b.length), b]); }
@@ -110,6 +120,8 @@ function createMpsServer(opts) {
     const devices = new Map(); // guid -> connection
 
     const creds = loadTlsCredentials(opts);
+    const certPem = Buffer.isBuffer(creds.cert) ? creds.cert.toString() : creds.cert;
+    const cn = certCommonName(certPem);
     const tlsOpts = {
         key: creds.key,
         cert: creds.cert,
@@ -425,6 +437,9 @@ function createMpsServer(opts) {
 
     return {
         server: server,
+        port: opts.port,
+        cn: cn,            // Common Name of the MPS TLS cert
+        cert: certPem,     // MPS TLS certificate (PEM) — public; used as the device's trusted root
         // A device is routable once it has authenticated.
         get: (guid) => { const c = devices.get(String(guid).toUpperCase()); return (c && c.authed) ? c : null; },
         openChannel: (guid, port, handlers) => {

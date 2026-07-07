@@ -82,8 +82,16 @@ still done end-to-end in the browser, so the MPS never sees AMT admin credential
 
 Enable it with `--mps` (see options below), then in **Add device** tick *Connect via
 CIRA* and pick the connected machine from the discovery list (its AMT GUID). Devices
-authenticate to the MPS with the username/password you configure — these must match the
-CIRA profile provisioned on the AMT machines.
+authenticate to the MPS with the username/password you configure.
+
+**Provisioning a device from WebAMT.** You don't need a separate tool to point a machine
+at the MPS. Connect to the device directly (on your LAN), open **Settings → Remote Access
+(CIRA)**, and WebAMT writes everything to the device for you: it adds the MPS server, adds
+the server's own certificate as a trusted root (matched by CN), creates the remote-access
+policy (periodic or user-initiated), and sets environment detection so the machine dials
+in. The MPS username/password you enter must match the server's `--mps-user` / `--mps-pass`
+(max 16 chars; AMT requires a strong password). Provisioning CIRA generally needs the
+device in **Admin Control Mode (ACM)**.
 
 ## Quick start
 
